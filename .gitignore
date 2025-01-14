@@ -1,0 +1,11 @@
+*.env
+helper.json
+/node_modules
+/dist
+list.json
+
+*-lock.json
+
+# test files
+test.js
+1.js

@@ -3,6 +3,10 @@ const cheerio = require('cheerio');
 const fs = require('fs');
 const express = require('express');
 const app = express();
+const { SocksProxyAgent } = require('socks-proxy-agent');
+const dotenv = require('dotenv');
+
+dotenv.config();
 
 // Base64 decode function that we'll need since the site uses it
 function decodeBase64(str) {
@@ -201,18 +205,14 @@ function needsUpdate(proxyData) {
 
 // 代理检测函数
 async function checkProxy(proxy, target, retries = 3) {
-  const [host, port] = proxy.split(':');
+  const [host, port] = proxy.split(":");
+  const agent = new SocksProxyAgent(`socks5://${host}:${port}`);
+  
   const config = {
-    proxy: {
-      host,
-      port,
-      protocol: 'socks5:'
-    },
+    httpsAgent: agent,
+    httpAgent: agent,
     timeout: 10000,
-    validateStatus: null,
-    httpsAgent: new (require('https').Agent)({
-      rejectUnauthorized: false  // 忽略SSL证书错误
-    })
+    validateStatus: null
   };
 
   for (let i = 0; i < retries; i++) {
@@ -220,6 +220,7 @@ async function checkProxy(proxy, target, retries = 3) {
       const response = await axios.get(target, config);
       return response.status >= 200 && response.status < 1000;
     } catch (error) {
+      console.log(`重试 ${i + 1}/${retries} 失败:`, error.message);
       if (i === retries - 1) return false;
       await new Promise(resolve => setTimeout(resolve, 1000));
     }
@@ -230,12 +231,29 @@ async function checkProxy(proxy, target, retries = 3) {
 // 并发检测函数
 async function batchCheckProxies(proxies, target, threads = 16) {
   const results = [];
-  for (let i = 0; i < proxies.length; i += threads) {
+  const totalBatches = Math.ceil(proxies.length / threads);
+  
+  for (let i = 0; i < proxies.length; i += threads) {  // 修复这里的循环条件
+    const currentBatch = Math.floor(i / threads) + 1;
     const batch = proxies.slice(i, i + threads);
-    const checks = batch.map(proxy => checkProxy(proxy.proxy, target));
+    console.log(`\n正在处理第 ${currentBatch}/${totalBatches} 批次，本批次包含 ${batch.length} 个代理`);
+    
+    const checks = batch.map(async (proxy) => {
+      console.log(`开始检测代理: ${proxy.proxy}`);
+      const result = await checkProxy(proxy.proxy, target);
+      console.log(`代理 ${proxy.proxy} 检测${result ? '成功' : '失败'}`);
+      return result;
+    });
+    
     const batchResults = await Promise.all(checks);
+    const batchSuccessCount = batchResults.filter(r => r).length;
+    console.log(`\n第 ${currentBatch} 批次完成，成功: ${batchSuccessCount}/${batch.length}`);
+    
     results.push(...batchResults);
   }
+  
+  const totalSuccess = results.filter(r => r).length;
+  console.log(`\n所有批次检测完成，总计成功: ${totalSuccess}/${proxies.length}`);
   return results;
 }
 
@@ -390,6 +408,7 @@ async function main() {
   // 从环境变量读取配置
   const checkCountry = process.env.CHECK_COUNTRY || '';
   const checkTarget = process.env.CHECK_TARGET || 'https://www.baidu.com';
+  let isChecking = false;
 
   // 首次运行抓取代理
   let proxyData;
@@ -409,6 +428,12 @@ async function main() {
   // 定期检查代理
   setInterval(async () => {
     try {
+      if (isChecking) {
+        console.log('\n正在检查中，跳过本次检查');
+        return;
+      }
+      isChecking = true;
+
       console.log(`\n[${new Date().toISOString()}] Starting proxy check...`);
       
       // 读取并检查数据是否需要更新
@@ -421,8 +446,10 @@ async function main() {
       }
 
       await cleanupProxies(proxyData, checkCountry, checkTarget);
+      isChecking = false;
     } catch (error) {
       console.error('Error during proxy check:', error);
+      isChecking = false;
     }
   }, 300000);
 }
